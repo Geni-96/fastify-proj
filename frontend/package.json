@@ -1,5 +1,5 @@
 {
-  "name": "fastify-proj",
+  "name": "frontend",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -9,9 +9,15 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "type": "commonjs",
   "dependencies": {
     "@azure/communication-calling": "^1.38.1",
     "@azure/communication-common": "^2.4.0",
-    "fastify": "^5.6.0"
+    "electron": "^38.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
   }
 }
