@@ -1,66 +1,108 @@
-import { CallClient } from "@azure/communication-calling";
-import { Features } from "@azure/communication-calling";
-import { AzureCommunicationTokenCredential } from '@azure/communication-common';
-import { CommunicationIdentityClient } from "@azure/communication-identity";
+// public/main.js
+import { CallClient, Features } from "@azure/communication-calling";
+import { AzureCommunicationTokenCredential } from "@azure/communication-common";
 
+const TOKEN_URL = "http://localhost:3000/token"; // ABSOLUTE URL — avoid relative '/token'
 
-let call;
-let callAgent;
+const meetingLinkInput = document.getElementById("teams-link-input");
+const joinBtn = document.getElementById("join-meeting-button");
+const hangUpBtn = document.getElementById("hang-up-button");
+const callStateEl = document.getElementById("call-state");
+const recordingStateEl = document.getElementById("recording-state");
 
-//environment variables
-const userAccess = 'process.env.USER_ACCESS_TOKEN';
-const identity = new CommunicationIdentityClient('azure-connection-string');
+let callClient, callAgent, call;
 
-// Least-privilege: join-only calling
-const { user, token } = await identity.createUserAndToken(["voip.join"]);
+async function getAcsToken() {
+  const res = await fetch(TOKEN_URL, { cache: "no-store" });
+  if (!res.ok) {
+    const txt = await res.text(); // helps debug when we accidentally get HTML
+    throw new Error(`Token fetch failed ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  const data = await res.json().catch(async () => {
+    const txt = await res.text();
+    throw new Error(`Token was not JSON. Got: ${txt.slice(0, 200)}`);
+  });
 
-//document elements
-const meetingLinkInput = document.getElementById('teams-link-input');
-const meetingIdInput = document.getElementById('teams-meetingId-input');
-const meetingPasscodeInput = document.getElementById('teams-passcode-input');
-const hangUpButton = document.getElementById('hang-up-button');
-const teamsMeetingJoinButton = document.getElementById('join-meeting-button');
-const callStateElement = document.getElementById('call-state');
-const recordingStateElement = document.getElementById('recording-state');
+  const tokenStr = typeof data.token === "string" ? data.token : data?.token?.token;
+  if (!tokenStr) throw new Error("Bad token payload: expected { token: string }");
+  return tokenStr;
+}
 
 async function init() {
-    const callClient = new CallClient();
-    const tokenCredential = new AzureCommunicationTokenCredential(token);
-    callAgent = await callClient.createCallAgent(tokenCredential, {displayName: user.displayName});
-    teamsMeetingJoinButton.disabled = false;
+  try {
+    callClient = new CallClient();
+    const tokenStr = await getAcsToken();
+    const cred = new AzureCommunicationTokenCredential(tokenStr);
+    callAgent = await callClient.createCallAgent(cred, { displayName: "ACS Client" });
+
+    // Optional: debug connectivity issues
+    callAgent.on("connectionStateChanged", (e) => {
+      console.log("callAgent connection:", e.oldState, "→", e.newState, "reason:", e.reason);
+    });
+
+    joinBtn.disabled = false;
+  } catch (e) {
+    console.error("Init failed:", e);
+    alert(e.message || e);
+  }
 }
 init();
 
-hangUpButton.addEventListener("click", async () => {
-    // end the current call
-    await call.hangUp();
-  
-    // toggle button states
-    hangUpButton.disabled = true;
-    teamsMeetingJoinButton.disabled = false;
-    callStateElement.innerText = '-';
-  });
+joinBtn.addEventListener("click", async () => {
+  try {
+    const link = meetingLinkInput.value.trim();
+    if (!link) return alert("Paste a Teams meeting link");
+    if (link.includes("teams.live.com")) {
+      return alert("This is a consumer (personal) Teams link; ACS can only join work/school meetings.");
+    }
 
-teamsMeetingJoinButton.addEventListener("click", () => {    
-    // join with meeting link
-    call = callAgent.join({meetingLink: meetingLinkInput.value}, {});
+    // Join (start muted to avoid device prompts while testing)
+    call = callAgent.join({ meetingLink: link }, { audioOptions: { muted: true } });
 
-   //(or) to join with meetingId and passcode use the below code snippet.
-   //call = callAgent.join({meetingId: meetingIdInput.value, passcode: meetingPasscodeInput.value}, {});
-    
-    call.on('stateChanged', () => {
-        callStateElement.innerText = call.state;
-    })
-
-    call.api(Features.Recording).on('isRecordingActiveChanged', () => {
-        if (call.api(Features.Recording).isRecordingActive) {
-            recordingStateElement.innerText = "This call is being recorded";
-        }
-        else {
-            recordingStateElement.innerText = "";
-        }
+    call.on("stateChanged", () => {
+      callStateEl.innerText = call.state;
+      console.log("call.state:", call.state);
+      if (call.state === "Disconnected") {
+        console.log("callEndReason:", call.callEndReason);
+        alert(`Call ended (${call.callEndReason?.code}/${call.callEndReason?.subCode})`);
+        joinBtn.disabled = false;
+        hangUpBtn.disabled = true;
+      }
     });
-    // toggle button states
-    hangUpButton.disabled = false;
-    teamsMeetingJoinButton.disabled = true;
+
+    // Show when recording is active (read-only)
+    const recording = call.feature(Features.Recording);
+    recording.on("isRecordingActiveChanged", () => {
+      recordingStateEl.innerText = recording.isRecordingActive ? "This call is being recorded" : "";
+    });
+
+    // (Optional) Pull mixed remote audio (preview) once connected
+    call.on("stateChanged", async () => {
+      if (call.state !== "Connected") return;
+      try {
+        const raw = call.feature(Features.RawAudio);
+        const mixed = await raw.startIncomingMixedAudio({
+          format: { sampleRate: 48000, channels: 1, pcm16: true }
+        });
+        // For now just count frames; later send to WS backend
+        let frames = 0;
+        mixed.on("audioFrame", () => { if (++frames % 100 === 0) console.log("frames:", frames); });
+      } catch (err) {
+        console.warn("Raw audio not available on this platform/SDK:", err);
+      }
+    });
+
+    joinBtn.disabled = true;
+    hangUpBtn.disabled = false;
+  } catch (e) {
+    console.error("Join failed:", e);
+    alert(e.message || e);
+  }
+});
+
+hangUpBtn.addEventListener("click", async () => {
+  try { await call?.hangUp(); } catch {}
+  hangUpBtn.disabled = true;
+  joinBtn.disabled = false;
+  callStateEl.innerText = "-";
 });
